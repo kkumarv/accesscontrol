@@ -1,0 +1,166 @@
+package wow.apigee.accesscontrol.whitelist;
+
+import com.apigee.flow.execution.ExecutionContext;
+import com.apigee.flow.execution.ExecutionResult;
+import com.apigee.flow.execution.spi.Execution;
+import com.apigee.flow.message.MessageContext;
+import com.apigee.flow.execution.Action;
+
+
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.apache.commons.lang.exception.ExceptionUtils;
+import org.apache.commons.net.util.SubnetUtils;
+
+
+
+public class Whitelist implements Execution {
+	
+	private static final String VARIABLE_REFERENCE_PATTERN_STRING = "(.*?)\\{([^\\{\\} :][^\\{\\} ]*?)\\}(.*?)";
+	private static final Pattern VARIABLE_REFERENCE_PATTERN = Pattern.compile(VARIABLE_REFERENCE_PATTERN_STRING);
+	
+	private Map <String,String> properties; // read-only
+
+    public Whitelist(Map <String,String> properties) {
+            this.properties = properties;
+    }
+      
+/**
+ * Validates he given client IP/IPs against the array of CIDR and sets the flag to a boolean value
+ */
+	public ExecutionResult execute(MessageContext messageContext, ExecutionContext executionContext) {
+		try {
+			//Initializing the flag and CIDR array
+			boolean flag = false;  //to save final result
+			String validateBasedOn = "X_FORWARDED_FOR_ALL_IP";  //Validation based on
+			String allowedIPList = "";
+			String clientIP  = "";
+			
+			
+			try {
+				
+				allowedIPList = getpropValues(messageContext, "KVM_CIDRs");  //Get CIDR list as property (Read from KVM)
+				clientIP =  getpropValues(messageContext, "ClientIP");  //Get clientIP from request
+				validateBasedOn =  getpropValues(messageContext, "validateBasedOn");
+				
+				if(allowedIPList ==null && clientIP == null){
+					throw new RuntimeException("Invalid input paramaters");
+				} else {
+					String[] forwrededList = clientIP.split(",");
+					switch(validateBasedOn) {
+					  case "X_FORWARDED_FOR_ALL_IP":
+						  for(int j=0 ;j < forwrededList.length; j++) {
+								flag  = validateIP(messageContext,allowedIPList,forwrededList[j]);
+								if(flag) {
+									break;
+								}
+							}
+					    break;
+					  case "X_FORWARDED_FOR_LAST_IP":
+						  flag  = validateIP(messageContext,allowedIPList,forwrededList[forwrededList.length-1]);
+					    break;
+					  case "X_FORWARDED_FOR_FIRST_IP":
+						  flag  = validateIP(messageContext,allowedIPList,forwrededList[0]);
+						    break;
+					  default:
+					    flag = false;
+					}
+					
+				}
+						
+			} catch (Exception e) {
+				throw new RuntimeException("Error Fetching prop values");
+			}
+	
+			messageContext.setVariable("whitelisted", flag); //Setting the validation result 
+	        return ExecutionResult.SUCCESS;
+		
+		 } catch (RuntimeException ex) {
+            ExecutionResult executionResult = new ExecutionResult(false, Action.ABORT);  
+            executionResult.setErrorResponse(ex.getMessage()); //Returns custom error message and header
+            executionResult.addErrorResponseHeader("ExceptionClass", ex.getClass().getName());
+            messageContext.setVariable("JAVA_ERROR", ex.getMessage());  //--Sets a flow variable -- may be useful for debugging. 
+            messageContext.setVariable("JAVA_STACKTRACE", ExceptionUtils.getStackTrace(ex));
+            return executionResult;
+        }
+		
+		
+	}
+	
+	
+	private boolean validateIP(MessageContext messageContext, String CIDR ,String clientIP) {
+		
+		boolean flag = false;
+		String[] kVMCIDR = CIDR.split(",");
+			for(int i = 0; i < kVMCIDR.length; i++)
+			   {
+				     try {
+				    	 SubnetUtils utils = new SubnetUtils(kVMCIDR[i]);
+				    	  if(utils.getInfo().isInRange(clientIP)) {
+								flag = true;	
+								break;
+							}
+				     }catch(Exception ex) {
+				    	 messageContext.setVariable("JAVA_Error",ex);
+				     }  	
+			   }
+		return flag;
+	}
+	
+	
+	 /**
+     * 
+     * @param spec
+     * @param msgCtxt
+     * @return
+     * Fetches the values for variable reference
+     */
+    private String resolveVariableReferences(String spec, MessageContext msgCtxt) {
+        Matcher matcher = VARIABLE_REFERENCE_PATTERN.matcher(spec);
+        StringBuffer sb = new StringBuffer();
+        while (matcher.find()) {
+          matcher.appendReplacement(sb, "");
+          sb.append(matcher.group(1));
+          String ref = matcher.group(2);
+          String[] parts = ref.split(":",2);
+          Object v = msgCtxt.getVariable(parts[0]);
+          if (v != null) {
+            sb.append((String) v);
+          }
+          else if (parts.length>1){
+            sb.append(parts[1]);
+          }
+          sb.append(matcher.group(3));
+        }
+        matcher.appendTail(sb);
+        return sb.toString();
+      }
+	
+	
+	   /**
+     * 
+     * @param msgCtxt
+     * @param propName
+     * @return
+     * @throws Exception
+     * To get the values of the properties.
+     * If the property matches variable pattern, it fetches the values using context getVariable,
+     * else it uses the given value for prop
+     */
+    private String getpropValues(MessageContext msgCtxt, String propName){
+        String key = this.properties.get(propName);
+        if (key != null) key = key.trim();
+        if (key == null || key.equals("")) {
+          return null;
+        }
+        key = resolveVariableReferences(key, msgCtxt);
+        if (key == null || key.equals("")) {
+          throw new IllegalStateException(propName + "resolves to null or empty.");
+        }
+        return key;
+      }
+    
+   
+}
